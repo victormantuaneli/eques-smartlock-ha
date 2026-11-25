@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import select
 import socket
+import struct
 import time
 from datetime import datetime
 from aiohttp import ClientSession, WSMsgType
@@ -162,6 +164,7 @@ class EquesClient:
     async def stop(self):
         """Stops the client and closes WebSocket connection."""
         self._running = False
+        await self.async_stop_rtc_stream()
         if self.cloud_ws:
             await self.cloud_ws.close()
         if self._task:
@@ -251,65 +254,140 @@ class EquesClient:
         self.is_doorbell_ringing = False
         self._notify_callbacks()
 
-    def _ensure_rtc_socket(self, own_peer_id: str, rtc_ip: str, rtc_port: int):
-        """Sets up local UDP socket and registers with RTC relay."""
+    async def async_start_rtc_stream(self) -> bool:
+        """Starts real-time YKRTC media streamer forwarding RTP to go2rtc port 8556."""
+        self._last_stream_activity = time.time()
+        if getattr(self, "_rtc_streaming", False) and getattr(self, "_rtc_task", None) and not self._rtc_task.done():
+            _LOGGER.debug("YKRTC stream already active; refreshed activity timestamp")
+            return True
+
+        self._rtc_streaming = True
+        self._rtc_task = asyncio.create_task(self._rtc_stream_loop())
+        return True
+
+    async def async_stop_rtc_stream(self):
+        """Stops the YKRTC media streamer."""
+        self._rtc_streaming = False
+        if getattr(self, "_rtc_task", None) and not self._rtc_task.done():
+            self._rtc_task.cancel()
+
+    async def _ensure_go2rtc_stream(self):
+        """Ensures the go2rtc stream 'campainha' is registered with source rtp:127.0.0.1:8556."""
         try:
-            if not hasattr(self, "_rtc_sock") or not self._rtc_sock:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.bind(("0.0.0.0", 0))
-                sock.setblocking(False)
-                self._rtc_sock = sock
-                self._rtc_ip = rtc_ip
-                self._rtc_port = rtc_port
-
-            auth_pkt = bytearray([0xC0, 0x01, 0x00, 0x40])
-            auth_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
-            self._rtc_sock.sendto(auth_pkt, (rtc_ip, rtc_port))
-            self._rtc_auth_pkt = auth_pkt
+            async with ClientSession() as session:
+                url = "http://127.0.0.1:1984/api/streams?name=campainha&src=rtp:127.0.0.1:8556"
+                async with session.put(url, timeout=3) as resp:
+                    _LOGGER.info("go2rtc PUT campainha response status: %s", resp.status)
         except Exception as err:
-            _LOGGER.debug("RTC socket init: %s", err)
+            _LOGGER.debug("Could not verify go2rtc stream registration: %s", err)
 
-    def _send_add_peer(self, remote_peer_id: str):
-        """Sends 135-byte Add Peer packet to link own_peer -> remote_peer on RTC server."""
-        try:
-            if hasattr(self, "_rtc_sock") and self._rtc_sock and hasattr(self, "_current_own_peer"):
-                pkt = bytearray([0x7F, 0x00, 0x84])
-                pkt.extend(self._current_own_peer.encode("ascii").ljust(64, b"\x00"))
-                pkt.extend(remote_peer_id.encode("ascii").ljust(64, b"\x00"))
-                pkt.extend(bytearray([0x0C, 0x00, 0x00, 0x00]))
-                self._rtc_sock.sendto(pkt, (self._rtc_ip, self._rtc_port))
-                _LOGGER.info("Linked RTC UDP peers: %s -> %s on %s:%s", self._current_own_peer[:8], remote_peer_id[:8], self._rtc_ip, self._rtc_port)
-        except Exception as err:
-            _LOGGER.debug("Error sending Add Peer: %s", err)
+    async def _rtc_stream_loop(self):
+        """Loop that connects to Eques RTC relay, negotiates session, and forwards RTP packets to go2rtc."""
+        await self._ensure_go2rtc_stream()
 
-    async def _async_answer_call(
-        self, remote_peer: str, rtc_ip: str, rtc_port: int, rtc_srv_ip: str, rtc_srv_port: int
-    ):
-        """Answers incoming call_v2 invite from lock."""
-        if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
-            return
-        import secrets
         own_peer_id = secrets.token_hex(16)
         self._current_own_peer = own_peer_id
-        self._ensure_rtc_socket(own_peer_id, rtc_ip, rtc_port)
-        self._send_add_peer(remote_peer)
 
-        ans = {
-            "method": "call_v2",
-            "from": self.session_bid,
-            "to": self.device_uid,
-            "channel_id": 0,
-            "state": "answer",
-            "netType": 0,
-            "rtcserverip": rtc_srv_ip,
-            "rtcserverport": rtc_srv_port,
-            "op_type": 0,
-            "rtcudpip": rtc_ip,
-            "rtcudpport": rtc_port,
-            "peerid": own_peer_id,
-        }
-        _LOGGER.info("Sending call_v2 answer to lock %s (peer: %s)", self.device_uid, own_peer_id)
-        await self.cloud_ws.send_str(json.dumps(ans))
+        # Local UDP socket for relay communication
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", 0))
+        sock.setblocking(False)
+
+        rtc_ip = "47.89.155.176"
+        rtc_port = 8800
+        go2rtc_udp_dest = ("127.0.0.1", 8556)
+
+        # 1. Opcode 1 (Authenticate)
+        auth_pkt = bytearray([0xC0, 0x01, 0x00, 0x40])
+        auth_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
+        sock.sendto(auth_pkt, (rtc_ip, rtc_port))
+
+        # 2. Opcode 2 (Channel Apply)
+        apply_pkt = bytearray([0x02, 0x00, 0x40])
+        apply_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
+        sock.sendto(apply_pkt, (rtc_ip, rtc_port))
+
+        channel_id = 0
+        last_keepalive = time.time()
+        packets_forwarded = 0
+
+        def send_add_peer(remote_peer: str, ch: int):
+            pkt = bytearray([0x04, 0x00, 0x44])
+            pkt.extend(remote_peer.encode("ascii").ljust(64, b"\x00"))
+            pkt.extend(struct.pack(">I", ch))
+            sock.sendto(pkt, (rtc_ip, rtc_port))
+            _LOGGER.info("Linked RTC peer %s to channel %s on relay", remote_peer[:8], ch)
+
+        async def send_call_answer(remote_peer: str, ch: int):
+            if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
+                return
+            ans = {
+                "method": "call_v2",
+                "from": self.session_bid,
+                "to": self.device_uid,
+                "channel_id": ch,
+                "state": "answer",
+                "netType": 0,
+                "rtcserverip": rtc_ip,
+                "rtcserverport": 8001,
+                "op_type": 0,
+                "rtcudpip": rtc_ip,
+                "rtcudpport": rtc_port,
+                "peerid": own_peer_id,
+            }
+            await self.cloud_ws.send_str(json.dumps(ans))
+            _LOGGER.info("Sent call_v2 answer to lock for peer %s (ch=%s)", remote_peer[:8], ch)
+
+        # Wake device / monitor if in standby
+        await self.async_wake_camera()
+
+        try:
+            while self._rtc_streaming and (time.time() - self._last_stream_activity < 30.0):
+                try:
+                    data, addr = sock.recvfrom(4096)
+                    if len(data) >= 7 and data[0] == 0x02:
+                        ch = struct.unpack(">I", data[3:7])[0]
+                        channel_id = ch
+                        _LOGGER.info("Relay assigned channel_id: %s", channel_id)
+                        if hasattr(self, "_last_remote_peer") and self._last_remote_peer:
+                            send_add_peer(self._last_remote_peer, channel_id)
+                            await send_call_answer(self._last_remote_peer, channel_id)
+                    elif data[0] >= 0x80:
+                        # Raw RFC 3550 RTP packet -> forward to go2rtc
+                        sock.sendto(data, go2rtc_udp_dest)
+                        packets_forwarded += 1
+                        if packets_forwarded % 50 == 1:
+                            _LOGGER.debug("Forwarded %d RTP packets to go2rtc", packets_forwarded)
+                    elif data[0] == 0x7E and len(data) > 12:
+                        # RTP packet with 12-byte header
+                        sock.sendto(data[12:], go2rtc_udp_dest)
+                        packets_forwarded += 1
+                    elif data[0] == 0x06:
+                        _LOGGER.debug("Relay notification: channel peer added")
+                except BlockingIOError:
+                    await asyncio.sleep(0.005)
+                except Exception as err:
+                    _LOGGER.debug("UDP recv error: %s", err)
+                    await asyncio.sleep(0.01)
+
+                # Keepalive auth every 2 seconds
+                if time.time() - last_keepalive > 2.0:
+                    sock.sendto(auth_pkt, (rtc_ip, rtc_port))
+                    last_keepalive = time.time()
+
+                # If remote peer arrived from cloud_ws while waiting for channel
+                if channel_id and hasattr(self, "_last_remote_peer") and self._last_remote_peer and not getattr(self, "_peer_linked", False):
+                    send_add_peer(self._last_remote_peer, channel_id)
+                    await send_call_answer(self._last_remote_peer, channel_id)
+                    self._peer_linked = True
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._rtc_streaming = False
+            self._peer_linked = False
+            sock.close()
+            _LOGGER.info("YKRTC streaming session ended (forwarded %d packets)", packets_forwarded)
 
     async def async_wake_camera(self) -> bool:
         """Wakes up the camera / requests video monitor stream via Cloud WebSocket."""
@@ -516,6 +594,9 @@ class EquesClient:
                                     remote_peer = payload.get("peerid")
                                     _LOGGER.info("WS Event call_v2 (state: %s, peer: %s)", state, remote_peer)
 
+                                    if remote_peer:
+                                        self._last_remote_peer = remote_peer
+
                                     if state == "invite":
                                         self.is_doorbell_ringing = True
                                         self.last_ring_time = int(now)
@@ -527,8 +608,9 @@ class EquesClient:
                                         self._notify_callbacks()
                                         asyncio.create_task(self._schedule_doorbell_reset())
 
-                                        # Do NOT auto-answer the call in HA so we do not steal
-                                        # the video call session from the user's mobile app!
+                                        # If HA is actively streaming (user watching live view):
+                                        if getattr(self, "_rtc_streaming", False):
+                                            self._last_stream_activity = now
 
                                         # Check queued unlock
                                         if (
@@ -544,8 +626,8 @@ class EquesClient:
 
                                     elif state == "answer":
                                         _LOGGER.info("Lock answered camera call (remote peer: %s)", remote_peer)
-                                        if remote_peer:
-                                            self._send_add_peer(remote_peer)
+                                        if getattr(self, "_rtc_streaming", False):
+                                            self._last_stream_activity = now
 
                                 # 4. Doorbell Ring (ring)
                                 elif method == "ring":
