@@ -1,0 +1,7 @@
+{
+  "name": "Eques Smart Lock & Doorbell",
+  "content_in_root": false,
+  "filename": "eques",
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}

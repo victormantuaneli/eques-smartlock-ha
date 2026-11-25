@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Eques Smart Lock & Doorbell",
+        "description": "Enter your Eques cloud account credentials and remote unlock PIN.",
+        "data": {
+          "username": "Username / Email / Phone",
+          "password": "Password",
+          "pin": "Remote Unlock PIN"
+        }
+      },
+      "device": {
+        "title": "Select Device",
+        "description": "Select the device you wish to add to Home Assistant.",
+        "data": {
+          "device_uid": "Eques Device"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Eques cloud server.",
+      "invalid_auth": "Invalid username or password.",
+      "no_devices_found": "No compatible smart locks found in this account."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Eques Lock Settings",
+        "description": "Configure friendly names for user IDs (passcodes, fingerprints, cards, or face IDs) and auto-relock timers.",
+        "data": {
+          "user_1": "User / ID 1 Name",
+          "user_2": "User / ID 2 Name",
+          "user_3": "User / ID 3 Name",
+          "user_4": "User / ID 4 Name",
+          "user_5": "User / ID 5 Name",
+          "custom_users": "Additional User IDs (Format: ID: Name, one per line)",
+          "auto_relock_seconds": "Auto-relock timeout after unlock (seconds)",
+          "queue_timeout": "Doorbell ring unlock queue timeout (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "lock": {
+      "lock": {
+        "name": "Lock"
+      }
+    },
+    "binary_sensor": {
+      "doorbell": {
+        "name": "Doorbell"
+      },
+      "cloud_connected": {
+        "name": "Cloud Connection"
+      }
+    },
+    "sensor": {
+      "last_unlock_method": {
+        "name": "Last Unlock Method"
+      },
+      "last_unlock_user": {
+        "name": "Last Unlock User"
+      },
+      "last_unlock_time": {
+        "name": "Last Unlock Time"
+      },
+      "last_ring_time": {
+        "name": "Last Doorbell Ring Time"
+      },
+      "device_status": {
+        "name": "Device Status"
+      }
+    },
+    "switch": {
+      "unlock_on_ring": {
+        "name": "Unlock on Doorbell Ring"
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Eques Smart Lock & Doorbell",
+        "description": "Insira as credenciais da sua conta Eques e o PIN de abertura remota.",
+        "data": {
+          "username": "Usuário / E-mail / Telefone",
+          "password": "Senha da Conta",
+          "pin": "PIN de Destrave Remoto"
+        }
+      },
+      "device": {
+        "title": "Selecionar Dispositivo",
+        "description": "Selecione a fechadura que deseja adicionar ao Home Assistant.",
+        "data": {
+          "device_uid": "Dispositivo Eques"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Não foi possível conectar ao servidor da Eques.",
+      "invalid_auth": "Usuário ou senha inválidos.",
+      "no_devices_found": "Nenhuma fechadura compatível encontrada nesta conta."
+    },
+    "abort": {
+      "already_configured": "Este dispositivo já está configurado no Home Assistant."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configurações da Fechadura Eques",
+        "description": "Cadastre nomes amigáveis para os IDs de usuário (senhas, biometrias, cartões ou face) e tempos de auto-trancamento.",
+        "data": {
+          "user_1": "Nome do Usuário / ID 1",
+          "user_2": "Nome do Usuário / ID 2",
+          "user_3": "Nome do Usuário / ID 3",
+          "user_4": "Nome do Usuário / ID 4",
+          "user_5": "Nome do Usuário / ID 5",
+          "custom_users": "IDs Adicionais (Formato: ID: Nome, um por linha)",
+          "auto_relock_seconds": "Tempo de Auto-Trancamento após Destrave (segundos)",
+          "queue_timeout": "Tempo limite da fila de abertura ao tocar a campainha (segundos)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "lock": {
+      "lock": {
+        "name": "Fechadura"
+      }
+    },
+    "binary_sensor": {
+      "doorbell": {
+        "name": "Campainha"
+      },
+      "cloud_connected": {
+        "name": "Conexão com a Nuvem"
+      }
+    },
+    "sensor": {
+      "last_unlock_method": {
+        "name": "Último Método de Abertura"
+      },
+      "last_unlock_user": {
+        "name": "Último Usuário a Abrir"
+      },
+      "last_unlock_time": {
+        "name": "Horário da Última Abertura"
+      },
+      "last_ring_time": {
+        "name": "Horário da Última Campainha"
+      },
+      "device_status": {
+        "name": "Status da Fechadura"
+      }
+    },
+    "switch": {
+      "unlock_on_ring": {
+        "name": "Abrir ao Tocar Campainha"
+      }
+    }
+  }
+}
