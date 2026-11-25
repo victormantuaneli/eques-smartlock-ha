@@ -40,7 +40,8 @@
           "user_5": "User / ID 5 Name",
           "custom_users": "Additional User IDs (Format: ID: Name, one per line)",
           "auto_relock_seconds": "Auto-relock timeout after unlock (seconds)",
-          "queue_timeout": "Doorbell ring unlock queue timeout (seconds)"
+          "queue_timeout": "Doorbell ring unlock queue timeout (seconds)",
+          "camera_rotation": "Camera snapshot rotation angle (degrees: 0, 90, 180, 270)"
         }
       }
     }

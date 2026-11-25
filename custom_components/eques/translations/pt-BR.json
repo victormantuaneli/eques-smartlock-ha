@@ -40,7 +40,8 @@
           "user_5": "Nome do Usuário / ID 5",
           "custom_users": "IDs Adicionais (Formato: ID: Nome, um por linha)",
           "auto_relock_seconds": "Tempo de Auto-Trancamento após Destrave (segundos)",
-          "queue_timeout": "Tempo limite da fila de abertura ao tocar a campainha (segundos)"
+          "queue_timeout": "Tempo limite da fila de abertura ao tocar a campainha (segundos)",
+          "camera_rotation": "Rotação da imagem da câmera (graus: 0, 90, 180, 270)"
         }
       }
     }

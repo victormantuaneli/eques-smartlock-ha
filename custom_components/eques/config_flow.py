@@ -22,8 +22,11 @@ from .const import (
     CONF_QUEUE_TIMEOUT,
     CONF_USER_MAPPINGS,
     CONF_USERNAME,
+    CONF_CAMERA_ROTATION,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_CAMERA_ROTATION,
+    ROTATION_OPTIONS,
     DOMAIN,
 )
 
@@ -237,6 +240,9 @@ class EquesOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_QUEUE_TIMEOUT: user_input.get(
                     CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT
                 ),
+                CONF_CAMERA_ROTATION: user_input.get(
+                    CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
+                ),
             }
 
             return self.async_create_entry(title="", data=options_data)
@@ -266,6 +272,12 @@ class EquesOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT
                 ),
             ): vol.All(vol.Coerce(int), vol.Range(min=30, max=1800)),
+            vol.Optional(
+                CONF_CAMERA_ROTATION,
+                default=current_options.get(
+                    CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
+                ),
+            ): vol.In(ROTATION_OPTIONS),
         })
 
         return self.async_show_form(

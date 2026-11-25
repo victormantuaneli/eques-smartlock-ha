@@ -11,10 +11,13 @@ CONF_DEVICE_NAME = "device_name"
 CONF_AUTO_RELOCK_SECONDS = "auto_relock_seconds"
 CONF_QUEUE_TIMEOUT = "queue_timeout"
 CONF_USER_MAPPINGS = "user_mappings"
+CONF_CAMERA_ROTATION = "camera_rotation"
 
 # Default configuration values
 DEFAULT_AUTO_RELOCK_SECONDS = 10
 DEFAULT_QUEUE_TIMEOUT = 300
+DEFAULT_CAMERA_ROTATION = 90
+ROTATION_OPTIONS = [0, 90, 180, 270]
 
 # Cloud WebSocket Configuration
 CLOUD_HOST = "us-virginia-j1.ecamzone.cc"

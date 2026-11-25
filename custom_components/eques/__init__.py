@@ -13,8 +13,10 @@ from .const import (
     CONF_QUEUE_TIMEOUT,
     CONF_USER_MAPPINGS,
     CONF_USERNAME,
+    CONF_CAMERA_ROTATION,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_CAMERA_ROTATION,
     DOMAIN,
     PLATFORMS,
 )
@@ -36,6 +38,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     auto_relock = options.get(CONF_AUTO_RELOCK_SECONDS, DEFAULT_AUTO_RELOCK_SECONDS)
     queue_timeout = options.get(CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT)
     user_mappings = options.get(CONF_USER_MAPPINGS, {})
+    camera_rotation = options.get(CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION)
 
     client = EquesClient(
         username=username,
@@ -45,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         auto_relock_seconds=auto_relock,
         queue_timeout=queue_timeout,
         user_mappings=user_mappings,
+        camera_rotation=camera_rotation,
         cache_dir=hass.config.path(".storage"),
     )
 

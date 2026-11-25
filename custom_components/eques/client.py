@@ -17,8 +17,10 @@ from .const import (
     CONF_AUTO_RELOCK_SECONDS,
     CONF_QUEUE_TIMEOUT,
     CONF_USER_MAPPINGS,
+    CONF_CAMERA_ROTATION,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_CAMERA_ROTATION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ class EquesClient:
         auto_relock_seconds: int = DEFAULT_AUTO_RELOCK_SECONDS,
         queue_timeout: int = DEFAULT_QUEUE_TIMEOUT,
         user_mappings: dict = None,
+        camera_rotation: int = DEFAULT_CAMERA_ROTATION,
         cache_dir: str = None,
     ):
         self.username = username
@@ -53,6 +56,7 @@ class EquesClient:
         self.auto_relock_seconds = auto_relock_seconds
         self.queue_timeout = queue_timeout
         self.user_mappings = user_mappings or {}
+        self.camera_rotation = camera_rotation
         self.cache_dir = cache_dir
 
         self.session_bid = None
@@ -105,7 +109,9 @@ class EquesClient:
             self.auto_relock_seconds = options[CONF_AUTO_RELOCK_SECONDS]
         if CONF_QUEUE_TIMEOUT in options:
             self.queue_timeout = options[CONF_QUEUE_TIMEOUT]
-        _LOGGER.info("Updated EquesClient options (user mappings: %s)", self.user_mappings)
+        if CONF_CAMERA_ROTATION in options:
+            self.camera_rotation = options[CONF_CAMERA_ROTATION]
+        _LOGGER.info("Updated EquesClient options (user mappings: %s, rotation: %s)", self.user_mappings, self.camera_rotation)
         self._notify_callbacks()
 
     def register_callback(self, callback):

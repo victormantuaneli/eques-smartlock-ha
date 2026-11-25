@@ -74,8 +74,33 @@ class EquesDoorbellCamera(Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Return bytes of the latest doorbell camera snapshot."""
-        return self._client.last_snapshot_bytes
+        """Return bytes of the latest doorbell camera snapshot, rotated to correct orientation."""
+        data = self._client.last_snapshot_bytes
+        if not data:
+            return None
+
+        rotation = getattr(self._client, "camera_rotation", 90)
+        if rotation % 360 == 0:
+            return data
+
+        return await self.hass.async_add_executor_job(
+            self._rotate_image, data, rotation
+        )
+
+    def _rotate_image(self, data: bytes, degrees: int) -> bytes:
+        """Rotates image bytes using Pillow in worker thread."""
+        try:
+            from PIL import Image
+            import io
+
+            img = Image.open(io.BytesIO(data))
+            rotated = img.rotate(degrees, expand=True)
+            out = io.BytesIO()
+            rotated.save(out, format="JPEG", quality=92)
+            return out.getvalue()
+        except Exception as err:
+            _LOGGER.warning("Could not rotate snapshot image: %s", err)
+            return data
 
     async def async_added_to_hass(self) -> None:
         """Register state update callbacks."""
