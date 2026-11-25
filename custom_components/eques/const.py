@@ -12,6 +12,7 @@ CONF_AUTO_RELOCK_SECONDS = "auto_relock_seconds"
 CONF_QUEUE_TIMEOUT = "queue_timeout"
 CONF_USER_MAPPINGS = "user_mappings"
 CONF_CAMERA_ROTATION = "camera_rotation"
+CONF_CAMERA_RTSP_URL = "camera_rtsp_url"
 
 # Default configuration values
 DEFAULT_AUTO_RELOCK_SECONDS = 10
@@ -26,4 +27,4 @@ APP_KEY = "8QYyilLNP1VtBQhMdXgKEAbRB6nKBDuV"
 APP_ID = 1015
 
 # Supported platforms
-PLATFORMS = ["lock", "binary_sensor", "sensor", "switch", "camera"]
+PLATFORMS = ["lock", "binary_sensor", "sensor", "switch", "camera", "button"]

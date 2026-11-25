@@ -1,7 +1,7 @@
 """Camera platform for Eques Smart Lock & Doorbell."""
 
 import logging
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
@@ -28,10 +28,11 @@ async def async_setup_entry(
 
 
 class EquesDoorbellCamera(Camera):
-    """Representation of the Eques Doorbell snapshot camera."""
+    """Representation of the Eques Doorbell camera (snapshots and live RTSP stream)."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "camera"
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, client: EquesClient, device_uid: str, device_name: str) -> None:
         """Initialize the camera."""
@@ -69,7 +70,20 @@ class EquesDoorbellCamera(Camera):
             attrs["last_snapshot_time"] = self._client.last_snapshot_time
         if self._client.last_fid:
             attrs["last_fid"] = self._client.last_fid
+        if self._client.camera_rtsp_url:
+            attrs["stream_url"] = self._client.camera_rtsp_url
+        if self._client.device_ip:
+            attrs["device_ip"] = self._client.device_ip
         return attrs
+
+    async def stream_source(self) -> str | None:
+        """Return the RTSP stream source for live view."""
+        if self._client.camera_rtsp_url:
+            return self._client.camera_rtsp_url
+
+        # Trigger wake-up command and SSDP discovery if stream requested
+        await self._client.async_wake_camera()
+        return self._client.camera_rtsp_url
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

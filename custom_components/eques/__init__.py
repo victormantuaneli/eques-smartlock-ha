@@ -14,6 +14,7 @@ from .const import (
     CONF_USER_MAPPINGS,
     CONF_USERNAME,
     CONF_CAMERA_ROTATION,
+    CONF_CAMERA_RTSP_URL,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
     DEFAULT_CAMERA_ROTATION,
@@ -39,6 +40,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     queue_timeout = options.get(CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT)
     user_mappings = options.get(CONF_USER_MAPPINGS, {})
     camera_rotation = options.get(CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION)
+    camera_rtsp_url = options.get(CONF_CAMERA_RTSP_URL, "")
 
     client = EquesClient(
         username=username,
@@ -49,6 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         queue_timeout=queue_timeout,
         user_mappings=user_mappings,
         camera_rotation=camera_rotation,
+        camera_rtsp_url=camera_rtsp_url,
         cache_dir=hass.config.path(".storage"),
     )
 
@@ -57,20 +60,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = client
 
-    # Set up all platforms (lock, binary_sensor, sensor, switch)
+    # Set up all platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register options update listener
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
     return True
-
-
-async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Update options dynamically when changed in options flow."""
-    client: EquesClient = hass.data[DOMAIN].get(entry.entry_id)
-    if client:
-        client.update_options(entry.options)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -84,3 +80,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
+
+
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update options dynamically without restarting."""
+    client: EquesClient = hass.data[DOMAIN].get(entry.entry_id)
+    if client:
+        options = {**entry.data, **entry.options}
+        client.auto_relock_seconds = options.get(
+            CONF_AUTO_RELOCK_SECONDS, DEFAULT_AUTO_RELOCK_SECONDS
+        )
+        client.queue_timeout = options.get(CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT)
+        client.user_mappings = options.get(CONF_USER_MAPPINGS, {})
+        client.camera_rotation = options.get(
+            CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
+        )
+        client.camera_rtsp_url = options.get(CONF_CAMERA_RTSP_URL, "")
+        _LOGGER.info("Eques options updated dynamically")

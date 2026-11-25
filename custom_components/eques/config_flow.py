@@ -23,6 +23,7 @@ from .const import (
     CONF_USER_MAPPINGS,
     CONF_USERNAME,
     CONF_CAMERA_ROTATION,
+    CONF_CAMERA_RTSP_URL,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
     DEFAULT_CAMERA_ROTATION,
@@ -243,6 +244,7 @@ class EquesOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_CAMERA_ROTATION: user_input.get(
                     CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
                 ),
+                CONF_CAMERA_RTSP_URL: str(user_input.get(CONF_CAMERA_RTSP_URL) or "").strip(),
             }
 
             return self.async_create_entry(title="", data=options_data)
@@ -278,6 +280,10 @@ class EquesOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
                 ),
             ): vol.In(ROTATION_OPTIONS),
+            vol.Optional(
+                CONF_CAMERA_RTSP_URL,
+                default=current_options.get(CONF_CAMERA_RTSP_URL, ""),
+            ): vol.Any(None, str),
         })
 
         return self.async_show_form(

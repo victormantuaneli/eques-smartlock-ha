@@ -5,6 +5,9 @@ import hashlib
 import json
 import logging
 import os
+import re
+import select
+import socket
 import time
 from datetime import datetime
 from aiohttp import ClientSession, WSMsgType
@@ -18,6 +21,7 @@ from .const import (
     CONF_QUEUE_TIMEOUT,
     CONF_USER_MAPPINGS,
     CONF_CAMERA_ROTATION,
+    CONF_CAMERA_RTSP_URL,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
     DEFAULT_CAMERA_ROTATION,
@@ -27,15 +31,20 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def compute_unlock_value(from_uid: str, to_uid: str) -> str:
-    """Computes reverse-engineered cryptographic value for open_smart_lock payload."""
-    part_from = from_uid[0:4] + from_uid[5:11] + from_uid[23:29]
-    part_to = to_uid[3:7] + to_uid[23:27]
-    raw = part_from + part_to + "EquesPWY"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    """Computes reverse-engineered cryptographic value for open_smart_lock payload.
+
+    Algorithm decompiled from native libicvss.so / classes3.dex:
+    token_str = from_uid + to_uid
+    SHA-1(token_str) -> md5(sha1_bytes) -> hex string
+    """
+    token_str = f"{from_uid}{to_uid}"
+    sha1_digest = hashlib.sha1(token_str.encode("utf-8")).digest()
+    md5_hash = hashlib.md5(sha1_digest).hexdigest()
+    return md5_hash
 
 
 class EquesClient:
-    """Manages persistent authenticated WebSocket connection to Eques Cloud."""
+    """Async client managing persistent WebSocket connection with Eques cloud."""
 
     def __init__(
         self,
@@ -47,6 +56,7 @@ class EquesClient:
         queue_timeout: int = DEFAULT_QUEUE_TIMEOUT,
         user_mappings: dict = None,
         camera_rotation: int = DEFAULT_CAMERA_ROTATION,
+        camera_rtsp_url: str = "",
         cache_dir: str = None,
     ):
         self.username = username
@@ -57,6 +67,8 @@ class EquesClient:
         self.queue_timeout = queue_timeout
         self.user_mappings = user_mappings or {}
         self.camera_rotation = camera_rotation
+        self.camera_rtsp_url = camera_rtsp_url or ""
+        self.device_ip = None
         self.cache_dir = cache_dir
 
         self.session_bid = None
@@ -70,11 +82,16 @@ class EquesClient:
         if self.cache_dir:
             try:
                 os.makedirs(self.cache_dir, exist_ok=True)
-                self._cache_file = os.path.join(self.cache_dir, f"eques_snapshot_{self.device_uid}.jpg")
+                self._cache_file = os.path.join(
+                    self.cache_dir, f"eques_snapshot_{self.device_uid}.jpg"
+                )
                 if os.path.exists(self._cache_file):
                     with open(self._cache_file, "rb") as f:
                         self.last_snapshot_bytes = f.read()
-                        _LOGGER.info("Loaded cached doorbell snapshot from disk (%d bytes)", len(self.last_snapshot_bytes))
+                        _LOGGER.info(
+                            "Loaded cached doorbell snapshot from disk (%d bytes)",
+                            len(self.last_snapshot_bytes),
+                        )
             except Exception as err:
                 _LOGGER.warning("Could not initialize snapshot disk cache: %s", err)
 
@@ -111,7 +128,14 @@ class EquesClient:
             self.queue_timeout = options[CONF_QUEUE_TIMEOUT]
         if CONF_CAMERA_ROTATION in options:
             self.camera_rotation = options[CONF_CAMERA_ROTATION]
-        _LOGGER.info("Updated EquesClient options (user mappings: %s, rotation: %s)", self.user_mappings, self.camera_rotation)
+        if CONF_CAMERA_RTSP_URL in options:
+            self.camera_rtsp_url = options[CONF_CAMERA_RTSP_URL]
+        _LOGGER.info(
+            "Updated EquesClient options (user mappings: %s, rotation: %s, rtsp: %s)",
+            self.user_mappings,
+            self.camera_rotation,
+            self.camera_rtsp_url,
+        )
         self._notify_callbacks()
 
     def register_callback(self, callback):
@@ -138,65 +162,67 @@ class EquesClient:
     async def stop(self):
         """Stops the client and closes WebSocket connection."""
         self._running = False
-        if self.cloud_ws and not self.cloud_ws.closed:
+        if self.cloud_ws:
             await self.cloud_ws.close()
         if self._task:
             self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
 
-    def arm_unlock_queue(self, timeout: int = None):
-        """Arms the unlock queue so the door automatically unlocks on next ring."""
-        now = time.time()
-        timeout_to_use = timeout or self.queue_timeout
-        self.queue_enabled = True
-        self.queue_expires_at = now + timeout_to_use
-        _LOGGER.info("Unlock queue armed for %s seconds", timeout_to_use)
-        self._notify_callbacks()
-
-    def disarm_unlock_queue(self):
-        """Disarms the unlock queue."""
-        self.queue_enabled = False
-        self.queue_expires_at = 0.0
-        _LOGGER.info("Unlock queue disarmed")
-        self._notify_callbacks()
-
-    async def async_unlock(self, pin: str = None, arm_if_sleeping: bool = True):
-        """
-        Sends remote unlock command.
-        If device is sleeping, arms queue to unlock on doorbell interaction.
-        """
-        pin_to_use = pin or self.pin
-        if arm_if_sleeping:
-            self.arm_unlock_queue(self.queue_timeout)
-
-        # Dispatch immediate packet
-        await self._send_unlock_payload(pin_to_use)
-
-    async def _send_unlock_payload(self, pin: str):
-        """Builds and sends open_smart_lock payload over WebSocket."""
-        if not self.cloud_ws or self.cloud_ws.closed or not self.session_uid:
-            _LOGGER.warning("Cannot send unlock: WebSocket is not connected or authenticated")
+    async def async_unlock(self) -> bool:
+        """Triggers remote unlock command using the configured PIN."""
+        if not self.pin:
+            _LOGGER.error("Unlock requested but no PIN configured")
             return False
 
-        now_ts = int(time.time())
-        hash_value = compute_unlock_value(self.session_uid, self.device_uid)
+        if not self.session_bid or not self.device_uid:
+            _LOGGER.error("Cannot unlock: missing session credentials")
+            return False
 
-        unlock_cmd = {
+        # Dispatch unlock with reinforce pulse
+        asyncio.create_task(self._dispatch_unlock_burst(self.pin))
+        return True
+
+    def set_queue_enabled(self, enabled: bool):
+        """Enables or disables auto-unlock on next doorbell ring."""
+        self.queue_enabled = enabled
+        if enabled:
+            self.queue_expires_at = time.time() + self.queue_timeout
+            _LOGGER.info(
+                "Queue unlock on doorbell ring ENABLED (expires in %d seconds)",
+                self.queue_timeout,
+            )
+        else:
+            self.queue_expires_at = 0.0
+            _LOGGER.info("Queue unlock on doorbell ring DISABLED")
+        self._notify_callbacks()
+
+    async def _send_unlock_payload(self, pin: str) -> bool:
+        """Sends open_smart_lock payload over Cloud WebSocket."""
+        if not self.cloud_ws or self.cloud_ws.closed:
+            _LOGGER.error("Cannot send unlock: Cloud WebSocket is not connected")
+            return False
+
+        sec_val = compute_unlock_value(self.session_bid, self.device_uid)
+        pin_md5 = hashlib.md5(pin.encode("utf-8")).hexdigest()
+
+        payload = {
             "method": "open_smart_lock",
-            "from": self.session_uid,
+            "from": self.session_bid,
             "to": self.device_uid,
-            "value": hash_value,
-            "userBid": self.session_bid if self.session_bid else self.session_uid,
-            "time": now_ts,
-            "pwd": str(pin),
+            "val": sec_val,
+            "type": "open",
+            "password": pin_md5,
         }
 
         try:
-            await self.cloud_ws.send_str(json.dumps(unlock_cmd))
-            _LOGGER.info("Dispatched open_smart_lock to %s", self.device_uid)
+            _LOGGER.info(
+                "Sending open_smart_lock payload to lock %s (user: %s)",
+                self.device_uid,
+                self.session_bid,
+            )
+            await self.cloud_ws.send_str(json.dumps(payload))
+            self.is_locked = False
+            self._notify_callbacks()
+            asyncio.create_task(self._schedule_relock())
             return True
         except Exception as err:
             _LOGGER.error("Failed to send open_smart_lock: %s", err)
@@ -215,13 +241,89 @@ class EquesClient:
         await asyncio.sleep(self.auto_relock_seconds)
         self.is_locked = True
         self._notify_callbacks()
-        _LOGGER.info("Lock state auto-reset to locked (%ss timeout)", self.auto_relock_seconds)
+        _LOGGER.info(
+            "Lock state auto-reset to locked (%ss timeout)", self.auto_relock_seconds
+        )
 
     async def _schedule_doorbell_reset(self):
         """Resets the doorbell ring binary sensor after 15 seconds."""
         await asyncio.sleep(15)
         self.is_doorbell_ringing = False
         self._notify_callbacks()
+
+    async def async_wake_camera(self) -> bool:
+        """Wakes up the camera / requests video monitor stream via Cloud WebSocket."""
+        if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
+            _LOGGER.warning("Cannot wake camera: cloud connection not active")
+            return False
+
+        payload = {
+            "method": "call_v2",
+            "from": self.session_bid,
+            "to": self.device_uid,
+            "channel_id": 0,
+            "state": "invite",
+            "netType": 1,
+            "rtcserverip": "47.89.155.176",
+            "rtcserverport": 8001,
+            "rtcudpip": "47.89.155.176",
+            "rtcudpport": 8001,
+            "op_type": 1,
+        }
+        _LOGGER.info("Sending camera wake/invite command to lock %s", self.device_uid)
+        try:
+            await self.cloud_ws.send_str(json.dumps(payload))
+            # Trigger background SSDP scan to discover local RTSP stream
+            asyncio.create_task(self.async_discover_local_rtsp())
+            return True
+        except Exception as err:
+            _LOGGER.error("Failed to send camera wake command: %s", err)
+            return False
+
+    async def async_discover_local_rtsp(self) -> str | None:
+        """Discovers the lock's local RTSP stream URL via native SSDP probe."""
+        if self.camera_rtsp_url:
+            return self.camera_rtsp_url
+
+        loop = asyncio.get_running_loop()
+        rtsp_url = await loop.run_in_executor(None, self._ssdp_probe_sync)
+        if rtsp_url:
+            self.camera_rtsp_url = rtsp_url
+            _LOGGER.info("Discovered local RTSP stream URL: %s", rtsp_url)
+            self._notify_callbacks()
+            return rtsp_url
+        return None
+
+    def _ssdp_probe_sync(self) -> str | None:
+        """Synchronous UDP SSDP probe discovered from libicvss.so reverse engineering."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        sock.settimeout(2.5)
+
+        try:
+            # 16-byte native magic packet discovered in Search_Url / libicvss.so
+            payload = b"1111111111111111"
+            sock.sendto(payload, ("239.255.255.250", 1900))
+            start = time.time()
+            while time.time() - start < 3.0:
+                r, _, _ = select.select([sock], [], [], 0.5)
+                if r:
+                    data, addr = sock.recvfrom(2048)
+                    text = data.decode("utf-8", errors="ignore")
+                    if "eques" in text.lower() or "8200" in text:
+                        m = re.search(r"http://([0-9\.]+):", text)
+                        if m:
+                            ip = m.group(1)
+                        else:
+                            ip = addr[0]
+                        self.device_ip = ip
+                        return f"rtsp://{ip}:554/1"
+        except Exception as err:
+            _LOGGER.debug("SSDP probe exception: %s", err)
+        finally:
+            sock.close()
+        return None
 
     async def async_fetch_snapshot(self, fid: str = None) -> bytes | None:
         """Downloads the snapshot for the given fid (or last_fid) from Eques Cloud."""
@@ -247,17 +349,24 @@ class EquesClient:
                         if len(data) > 100:
                             self.last_snapshot_bytes = data
                             self.last_fid = target_fid
-                            _LOGGER.info("Successfully fetched doorbell snapshot (%d bytes)", len(data))
+                            _LOGGER.info(
+                                "Successfully fetched doorbell snapshot (%d bytes)",
+                                len(data),
+                            )
                             if self._cache_file:
                                 try:
                                     with open(self._cache_file, "wb") as f:
                                         f.write(data)
                                 except Exception as err:
-                                    _LOGGER.warning("Failed to save snapshot cache: %s", err)
+                                    _LOGGER.warning(
+                                        "Failed to save snapshot cache: %s", err
+                                    )
                             self._notify_callbacks()
                             return data
                     else:
-                        _LOGGER.warning("Snapshot download returned HTTP status %d", resp.status)
+                        _LOGGER.warning(
+                            "Snapshot download returned HTTP status %d", resp.status
+                        )
         except Exception as err:
             _LOGGER.error("Error downloading snapshot fid %s: %s", target_fid, err)
         return None
@@ -279,7 +388,9 @@ class EquesClient:
             try:
                 _LOGGER.info("Connecting to Eques Cloud (%s)...", CLOUD_HOST)
                 async with ClientSession() as session:
-                    async with session.ws_connect(CLOUD_WS_URL, heartbeat=25, timeout=10) as ws:
+                    async with session.ws_connect(
+                        CLOUD_WS_URL, heartbeat=25, timeout=10
+                    ) as ws:
                         self.cloud_ws = ws
                         await ws.send_str(json.dumps(login_payload))
 
@@ -301,19 +412,32 @@ class EquesClient:
                                         self.session_bid = payload.get("bid")
                                         self.session_uid = payload.get("uid")
                                         self.connected_to_cloud = True
-                                        _LOGGER.info("Authenticated as %s (UID: %s)", self.username, self.session_uid)
-                                        await ws.send_str(json.dumps({"method": "bdylist"}))
-                                        await ws.send_str(json.dumps({"method": "getok"}))
+                                        _LOGGER.info(
+                                            "Authenticated as %s (UID: %s)",
+                                            self.username,
+                                            self.session_uid,
+                                        )
+                                        await ws.send_str(
+                                            json.dumps({"method": "bdylist"})
+                                        )
+                                        await ws.send_str(
+                                            json.dumps({"method": "getok"})
+                                        )
                                         self._notify_callbacks()
                                     else:
-                                        _LOGGER.error("Authentication rejected: %s", payload.get("reason"))
+                                        _LOGGER.error(
+                                            "Authentication rejected: %s",
+                                            payload.get("reason"),
+                                        )
 
                                 # 1b. Media Token (getok)
                                 elif method == "getok":
                                     token = payload.get("token")
                                     if token:
                                         self.http_token = token
-                                        _LOGGER.info("Acquired Eques media token for doorbell snapshots")
+                                        _LOGGER.info(
+                                            "Acquired Eques media token for doorbell snapshots"
+                                        )
 
                                 # 2. Device Status (devst)
                                 elif method == "devst":
@@ -331,14 +455,29 @@ class EquesClient:
                                     self.device_status = "awake"
                                     self.is_doorbell_ringing = True
                                     self.last_ring_time = int(now)
-                                    self.last_ring_datetime = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+                                    self.last_ring_datetime = (
+                                        datetime.fromtimestamp(now).strftime(
+                                            "%Y-%m-%d %H:%M:%S"
+                                        )
+                                    )
                                     self._notify_callbacks()
                                     asyncio.create_task(self._schedule_doorbell_reset())
+                                    # Trigger local stream discovery
+                                    asyncio.create_task(
+                                        self.async_discover_local_rtsp()
+                                    )
 
                                     # Check queued unlock
-                                    if self.queue_enabled and now <= self.queue_expires_at:
-                                        _LOGGER.info("Doorbell pressed with active queue! Auto-unlocking...")
-                                        asyncio.create_task(self._dispatch_unlock_burst(self.pin))
+                                    if (
+                                        self.queue_enabled
+                                        and now <= self.queue_expires_at
+                                    ):
+                                        _LOGGER.info(
+                                            "Doorbell pressed with active queue! Auto-unlocking..."
+                                        )
+                                        asyncio.create_task(
+                                            self._dispatch_unlock_burst(self.pin)
+                                        )
 
                                 # 4. Doorbell Ring (ring)
                                 elif method == "ring":
@@ -346,23 +485,43 @@ class EquesClient:
                                     self.device_status = "awake"
                                     self.is_doorbell_ringing = True
                                     self.last_ring_time = int(now)
-                                    self.last_ring_datetime = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+                                    self.last_ring_datetime = (
+                                        datetime.fromtimestamp(now).strftime(
+                                            "%Y-%m-%d %H:%M:%S"
+                                        )
+                                    )
                                     self._notify_callbacks()
                                     asyncio.create_task(self._schedule_doorbell_reset())
+                                    asyncio.create_task(
+                                        self.async_discover_local_rtsp()
+                                    )
 
-                                    if self.queue_enabled and now <= self.queue_expires_at:
-                                        _LOGGER.info("Doorbell ring with active queue! Auto-unlocking...")
-                                        asyncio.create_task(self._dispatch_unlock_burst(self.pin))
+                                    if (
+                                        self.queue_enabled
+                                        and now <= self.queue_expires_at
+                                    ):
+                                        _LOGGER.info(
+                                            "Doorbell ring with active queue! Auto-unlocking..."
+                                        )
+                                        asyncio.create_task(
+                                            self._dispatch_unlock_burst(self.pin)
+                                        )
 
                                 # 4b. Doorbell Snapshot Upload (filetrans)
                                 elif method == "filetrans":
                                     fid = payload.get("fid")
                                     filetime = payload.get("filetime")
-                                    _LOGGER.info("Received filetrans event (fid: %s, filetime: %s)", fid, filetime)
+                                    _LOGGER.info(
+                                        "Received filetrans event (fid: %s, filetime: %s)",
+                                        fid,
+                                        filetime,
+                                    )
                                     if fid:
                                         self.last_fid = fid
                                         self.last_snapshot_time = filetime
-                                        asyncio.create_task(self.async_fetch_snapshot(fid))
+                                        asyncio.create_task(
+                                            self.async_fetch_snapshot(fid)
+                                        )
 
                                 # 5. Lock Activity Messages
                                 elif method == "smart_lock_msg":
@@ -376,66 +535,38 @@ class EquesClient:
                                     mapped_name = self.user_mappings.get(user_id)
                                     if mapped_name:
                                         friendly_nick = mapped_name
-                                    elif raw_nick and raw_nick != user_id and raw_nick != "I":
+                                    elif (
+                                        raw_nick
+                                        and raw_nick != user_id
+                                        and raw_nick != "I"
+                                    ):
                                         friendly_nick = raw_nick
-                                    elif unlock_type == 7:
-                                        friendly_nick = self.username
-                                    elif user_id:
-                                        friendly_nick = f"User {user_id}"
                                     else:
-                                        friendly_nick = "Unknown"
+                                        friendly_nick = f"User {user_id}"
 
-                                    type_map = {
-                                        1: "Keypad PIN",
-                                        2: "Fingerprint",
-                                        3: "RFID Card",
-                                        7: "Remote App",
-                                        10: "Face Recognition / Keypad",
-                                        15: "Smart Lock State",
-                                    }
-                                    type_str = type_map.get(unlock_type, f"Type {unlock_type}")
-                                    self.device_status = "awake"
-
-                                    # type 1..10 (or any message with user identifier except 15) represents an unlock
-                                    if unlock_type in (1, 2, 3, 4, 5, 6, 7, 10) or (user_id and unlock_type != 15):
-                                        self.last_unlock_type = type_str
-                                        self.last_unlock_user = user_id
-                                        self.last_unlock_nick = friendly_nick
-                                        self.last_unlock_time = int(now)
-                                        self.last_unlock_datetime = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
-                                        self.last_record_id = record_id
-
-                                        self.queue_enabled = False
-                                        self.is_locked = False
-                                        _LOGGER.info("Lock unlocked via %s by %s (%s)", type_str, friendly_nick, user_id)
-                                        self._notify_callbacks()
-                                        asyncio.create_task(self._schedule_relock())
-
-                                # 6. Remote Unlock Confirmations
-                                elif method in ("open_smart_lock_result", "open_smart_lock_response"):
-                                    ret = payload.get("status", payload.get("ret", payload.get("code", 0)))
-                                    now = time.time()
-                                    if ret == 0 or ret == 4000:
-                                        self.queue_enabled = False
-                                        self.is_locked = False
-                                        self.last_unlock_type = "Remote App"
-                                        self.last_unlock_time = int(now)
-                                        self.last_unlock_datetime = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
-                                        if not self.last_unlock_nick:
-                                            self.last_unlock_nick = self.user_mappings.get("app") or self.username
-                                        _LOGGER.info("Remote unlock confirmed by physical lock")
-                                        self._notify_callbacks()
-                                        asyncio.create_task(self._schedule_relock())
+                                    self.last_unlock_type = unlock_type
+                                    self.last_unlock_user = user_id
+                                    self.last_unlock_nick = friendly_nick
+                                    self.last_unlock_time = int(now)
+                                    self.last_unlock_datetime = (
+                                        datetime.fromtimestamp(now).strftime(
+                                            "%Y-%m-%d %H:%M:%S"
+                                        )
+                                    )
+                                    self.last_record_id = record_id
+                                    self.is_locked = False
+                                    self._notify_callbacks()
+                                    asyncio.create_task(self._schedule_relock())
 
                             elif msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                                _LOGGER.warning("WebSocket disconnected: %s", msg)
+                                _LOGGER.warning("Cloud WebSocket closed or errored")
                                 break
 
             except Exception as err:
                 _LOGGER.error("WebSocket connection error: %s", err)
-            finally:
-                self.cloud_ws = None
-                self.connected_to_cloud = False
-                self._notify_callbacks()
-                if self._running:
-                    await asyncio.sleep(5)
+
+            self.connected_to_cloud = False
+            self._notify_callbacks()
+            if self._running:
+                _LOGGER.info("Reconnecting to Eques Cloud in 5 seconds...")
+                await asyncio.sleep(5)
