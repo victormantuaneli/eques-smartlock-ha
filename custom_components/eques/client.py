@@ -298,27 +298,49 @@ class EquesClient:
         """Synchronous UDP SSDP probe discovered from libicvss.so reverse engineering."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         sock.settimeout(2.5)
 
         try:
-            # 16-byte native magic packet discovered in Search_Url / libicvss.so
-            payload = b"1111111111111111"
-            sock.sendto(payload, ("239.255.255.250", 1900))
+            try:
+                # libicvss.so native client_discovery binds local UDP port 1234
+                sock.bind(("", 1234))
+            except Exception:
+                sock.bind(("", 0))
+
+            msearch_payload = (
+                f"M-SEARCH * HTTP/1.1\r\n"
+                f"HOST:239.255.255.250:1900\r\n"
+                f"MAN:ssdp:discover\r\n"
+                f"MX: 5\r\n"
+                f"ST:uuid:{self.device_uid}\r\n\r\n"
+            ).encode("utf-8")
+            legacy_payload = b"1111111111111111"
+
+            targets = [("239.255.255.250", 1900), ("255.255.255.255", 1900)]
+            for target in targets:
+                try:
+                    sock.sendto(msearch_payload, target)
+                    sock.sendto(legacy_payload, target)
+                except Exception:
+                    pass
+
             start = time.time()
-            while time.time() - start < 3.0:
+            while time.time() - start < 3.5:
                 r, _, _ = select.select([sock], [], [], 0.5)
                 if r:
                     data, addr = sock.recvfrom(2048)
                     text = data.decode("utf-8", errors="ignore")
-                    if "eques" in text.lower() or "8200" in text:
+                    if "eques" in text.lower() or "8200" in text or "8554" in text:
                         m = re.search(r"http://([0-9\.]+):", text)
                         if m:
                             ip = m.group(1)
                         else:
                             ip = addr[0]
                         self.device_ip = ip
-                        return f"rtsp://{ip}:554/1"
+                        # Eques camera RTSP stream runs on port 8554 path /1 as reversed in Search_Url
+                        return f"rtsp://{ip}:8554/1"
         except Exception as err:
             _LOGGER.debug("SSDP probe exception: %s", err)
         finally:
