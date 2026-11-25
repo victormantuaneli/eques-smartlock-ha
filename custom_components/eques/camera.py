@@ -32,7 +32,6 @@ class EquesDoorbellCamera(Camera):
 
     _attr_has_entity_name = True
     _attr_translation_key = "camera"
-    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, client: EquesClient, device_uid: str, device_name: str) -> None:
         """Initialize the camera."""
@@ -41,6 +40,13 @@ class EquesDoorbellCamera(Camera):
         self._device_uid = device_uid
         self._device_name = device_name
         self._attr_unique_id = f"{device_uid}_camera"
+
+    @property
+    def supported_features(self) -> CameraEntityFeature:
+        """Return supported features. Stream is enabled only if custom RTSP URL is provided."""
+        if self._client.camera_rtsp_url:
+            return CameraEntityFeature.STREAM
+        return CameraEntityFeature(0)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -91,9 +97,11 @@ class EquesDoorbellCamera(Camera):
         """Return bytes of the latest doorbell camera snapshot, rotated to correct orientation."""
         data = self._client.last_snapshot_bytes
         if not data:
+            data = await self._client.async_fetch_snapshot()
+        if not data:
             return None
 
-        rotation = getattr(self._client, "camera_rotation", 90)
+        rotation = getattr(self._client, "camera_rotation", 270)
         if rotation % 360 == 0:
             return data
 

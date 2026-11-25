@@ -251,33 +251,123 @@ class EquesClient:
         self.is_doorbell_ringing = False
         self._notify_callbacks()
 
+    def _ensure_rtc_socket(self, own_peer_id: str, rtc_ip: str, rtc_port: int):
+        """Sets up local UDP socket and registers with RTC relay."""
+        try:
+            if not hasattr(self, "_rtc_sock") or not self._rtc_sock:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind(("0.0.0.0", 0))
+                sock.setblocking(False)
+                self._rtc_sock = sock
+                self._rtc_ip = rtc_ip
+                self._rtc_port = rtc_port
+
+            auth_pkt = bytearray([0xC0, 0x01, 0x00, 0x40])
+            auth_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
+            self._rtc_sock.sendto(auth_pkt, (rtc_ip, rtc_port))
+            self._rtc_auth_pkt = auth_pkt
+        except Exception as err:
+            _LOGGER.debug("RTC socket init: %s", err)
+
+    def _send_add_peer(self, remote_peer_id: str):
+        """Sends 135-byte Add Peer packet to link own_peer -> remote_peer on RTC server."""
+        try:
+            if hasattr(self, "_rtc_sock") and self._rtc_sock and hasattr(self, "_current_own_peer"):
+                pkt = bytearray([0x7F, 0x00, 0x84])
+                pkt.extend(self._current_own_peer.encode("ascii").ljust(64, b"\x00"))
+                pkt.extend(remote_peer_id.encode("ascii").ljust(64, b"\x00"))
+                pkt.extend(bytearray([0x0C, 0x00, 0x00, 0x00]))
+                self._rtc_sock.sendto(pkt, (self._rtc_ip, self._rtc_port))
+                _LOGGER.info("Linked RTC UDP peers: %s -> %s on %s:%s", self._current_own_peer[:8], remote_peer_id[:8], self._rtc_ip, self._rtc_port)
+        except Exception as err:
+            _LOGGER.debug("Error sending Add Peer: %s", err)
+
+    async def _async_answer_call(
+        self, remote_peer: str, rtc_ip: str, rtc_port: int, rtc_srv_ip: str, rtc_srv_port: int
+    ):
+        """Answers incoming call_v2 invite from lock."""
+        if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
+            return
+        import secrets
+        own_peer_id = secrets.token_hex(16)
+        self._current_own_peer = own_peer_id
+        self._ensure_rtc_socket(own_peer_id, rtc_ip, rtc_port)
+        self._send_add_peer(remote_peer)
+
+        ans = {
+            "method": "call_v2",
+            "from": self.session_bid,
+            "to": self.device_uid,
+            "channel_id": 0,
+            "state": "answer",
+            "netType": 0,
+            "rtcserverip": rtc_srv_ip,
+            "rtcserverport": rtc_srv_port,
+            "op_type": 0,
+            "rtcudpip": rtc_ip,
+            "rtcudpport": rtc_port,
+            "peerid": own_peer_id,
+        }
+        _LOGGER.info("Sending call_v2 answer to lock %s (peer: %s)", self.device_uid, own_peer_id)
+        await self.cloud_ws.send_str(json.dumps(ans))
+
     async def async_wake_camera(self) -> bool:
         """Wakes up the camera / requests video monitor stream via Cloud WebSocket."""
         if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
             _LOGGER.warning("Cannot wake camera: cloud connection not active")
             return False
 
-        payload = {
+        import secrets
+        own_peer_id = secrets.token_hex(16)
+        self._current_own_peer = own_peer_id
+        rtc_ip = "47.89.155.176"
+        rtc_port = 8800
+
+        self._ensure_rtc_socket(own_peer_id, rtc_ip, rtc_port)
+
+        # 1. Send call_v2 invite
+        call_invite = {
             "method": "call_v2",
             "from": self.session_bid,
             "to": self.device_uid,
             "channel_id": 0,
             "state": "invite",
-            "netType": 1,
-            "rtcserverip": "47.89.155.176",
+            "netType": 0,
+            "rtcserverip": rtc_ip,
             "rtcserverport": 8001,
-            "rtcudpip": "47.89.155.176",
-            "rtcudpport": 8001,
-            "op_type": 1,
+            "op_type": 0,
+            "rtcudpip": rtc_ip,
+            "rtcudpport": rtc_port,
+            "peerid": own_peer_id,
         }
-        _LOGGER.info("Sending camera wake/invite command to lock %s", self.device_uid)
+
+        # 2. Send wake_up_t1_r700 with id: 2, val: 1 (open camera monitor)
+        wake_payload = {
+            "method": "wake_up_t1_r700",
+            "from": self.session_bid,
+            "to": self.device_uid,
+            "id": int(time.time()),
+            "value": {
+                "id": 2,
+                "val": 1
+            },
+            "wakeup_type": 0,
+            "call_invite": {
+                "ip": rtc_ip,
+                "port": rtc_port,
+                "type": 0,
+                "id": own_peer_id,
+                "uid": self.session_bid,
+            }
+        }
+
+        _LOGGER.info("Sending camera monitor wake commands (id: 2, val: 1) to lock %s", self.device_uid)
         try:
-            await self.cloud_ws.send_str(json.dumps(payload))
-            # Trigger background SSDP scan to discover local RTSP stream
-            asyncio.create_task(self.async_discover_local_rtsp())
+            await self.cloud_ws.send_str(json.dumps(call_invite))
+            await self.cloud_ws.send_str(json.dumps(wake_payload))
             return True
         except Exception as err:
-            _LOGGER.error("Failed to send camera wake command: %s", err)
+            _LOGGER.error("Failed to send camera wake commands: %s", err)
             return False
 
     async def async_discover_local_rtsp(self) -> str | None:
@@ -298,49 +388,27 @@ class EquesClient:
         """Synchronous UDP SSDP probe discovered from libicvss.so reverse engineering."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         sock.settimeout(2.5)
 
         try:
-            try:
-                # libicvss.so native client_discovery binds local UDP port 1234
-                sock.bind(("", 1234))
-            except Exception:
-                sock.bind(("", 0))
-
-            msearch_payload = (
-                f"M-SEARCH * HTTP/1.1\r\n"
-                f"HOST:239.255.255.250:1900\r\n"
-                f"MAN:ssdp:discover\r\n"
-                f"MX: 5\r\n"
-                f"ST:uuid:{self.device_uid}\r\n\r\n"
-            ).encode("utf-8")
-            legacy_payload = b"1111111111111111"
-
-            targets = [("239.255.255.250", 1900), ("255.255.255.255", 1900)]
-            for target in targets:
-                try:
-                    sock.sendto(msearch_payload, target)
-                    sock.sendto(legacy_payload, target)
-                except Exception:
-                    pass
-
+            # 16-byte native magic packet discovered in Search_Url / libicvss.so
+            payload = b"1111111111111111"
+            sock.sendto(payload, ("239.255.255.250", 1900))
             start = time.time()
-            while time.time() - start < 3.5:
+            while time.time() - start < 3.0:
                 r, _, _ = select.select([sock], [], [], 0.5)
                 if r:
                     data, addr = sock.recvfrom(2048)
                     text = data.decode("utf-8", errors="ignore")
-                    if "eques" in text.lower() or "8200" in text or "8554" in text:
+                    if "eques" in text.lower() or "8200" in text:
                         m = re.search(r"http://([0-9\.]+):", text)
                         if m:
                             ip = m.group(1)
                         else:
                             ip = addr[0]
                         self.device_ip = ip
-                        # Eques camera RTSP stream runs on port 8554 path /1 as reversed in Search_Url
-                        return f"rtsp://{ip}:8554/1"
+                        return f"rtsp://{ip}:554/1"
         except Exception as err:
             _LOGGER.debug("SSDP probe exception: %s", err)
         finally:
@@ -475,31 +543,48 @@ class EquesClient:
                                 elif method == "call_v2":
                                     now = time.time()
                                     self.device_status = "awake"
-                                    self.is_doorbell_ringing = True
-                                    self.last_ring_time = int(now)
-                                    self.last_ring_datetime = (
-                                        datetime.fromtimestamp(now).strftime(
-                                            "%Y-%m-%d %H:%M:%S"
-                                        )
-                                    )
-                                    self._notify_callbacks()
-                                    asyncio.create_task(self._schedule_doorbell_reset())
-                                    # Trigger local stream discovery
-                                    asyncio.create_task(
-                                        self.async_discover_local_rtsp()
-                                    )
+                                    state = payload.get("state")
+                                    remote_peer = payload.get("peerid")
+                                    _LOGGER.info("WS Event call_v2 (state: %s, peer: %s)", state, remote_peer)
 
-                                    # Check queued unlock
-                                    if (
-                                        self.queue_enabled
-                                        and now <= self.queue_expires_at
-                                    ):
-                                        _LOGGER.info(
-                                            "Doorbell pressed with active queue! Auto-unlocking..."
+                                    if state == "invite":
+                                        self.is_doorbell_ringing = True
+                                        self.last_ring_time = int(now)
+                                        self.last_ring_datetime = (
+                                            datetime.fromtimestamp(now).strftime(
+                                                "%Y-%m-%d %H:%M:%S"
+                                            )
                                         )
-                                        asyncio.create_task(
-                                            self._dispatch_unlock_burst(self.pin)
-                                        )
+                                        self._notify_callbacks()
+                                        asyncio.create_task(self._schedule_doorbell_reset())
+
+                                        if remote_peer:
+                                            asyncio.create_task(
+                                                self._async_answer_call(
+                                                    remote_peer,
+                                                    payload.get("rtcudpip", "47.89.155.176"),
+                                                    payload.get("rtcudpport", 8800),
+                                                    payload.get("rtcserverip", "47.89.155.176"),
+                                                    payload.get("rtcserverport", 8001),
+                                                )
+                                            )
+
+                                        # Check queued unlock
+                                        if (
+                                            self.queue_enabled
+                                            and now <= self.queue_expires_at
+                                        ):
+                                            _LOGGER.info(
+                                                "Doorbell pressed with active queue! Auto-unlocking..."
+                                            )
+                                            asyncio.create_task(
+                                                self._dispatch_unlock_burst(self.pin)
+                                            )
+
+                                    elif state == "answer":
+                                        _LOGGER.info("Lock answered camera call (remote peer: %s)", remote_peer)
+                                        if remote_peer:
+                                            self._send_add_peer(remote_peer)
 
                                 # 4. Doorbell Ring (ring)
                                 elif method == "ring":
@@ -512,11 +597,14 @@ class EquesClient:
                                             "%Y-%m-%d %H:%M:%S"
                                         )
                                     )
+                                    fid = payload.get("fid")
+                                    if fid:
+                                        self.last_fid = fid
+                                        asyncio.create_task(
+                                            self.async_fetch_snapshot(fid)
+                                        )
                                     self._notify_callbacks()
                                     asyncio.create_task(self._schedule_doorbell_reset())
-                                    asyncio.create_task(
-                                        self.async_discover_local_rtsp()
-                                    )
 
                                     if (
                                         self.queue_enabled
@@ -528,6 +616,13 @@ class EquesClient:
                                         asyncio.create_task(
                                             self._dispatch_unlock_burst(self.pin)
                                         )
+
+                                # 4a. Camera Wake Result
+                                elif method == "wake_up_result":
+                                    status = payload.get("status")
+                                    _LOGGER.info("Received wake_up_result from lock %s (status: %s)", self.device_uid, status)
+                                    self.device_status = "awake"
+                                    self._notify_callbacks()
 
                                 # 4b. Doorbell Snapshot Upload (filetrans)
                                 elif method == "filetrans":
