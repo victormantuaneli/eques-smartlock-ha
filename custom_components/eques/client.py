@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from aiohttp import ClientSession, WSMsgType
@@ -43,6 +44,7 @@ class EquesClient:
         auto_relock_seconds: int = DEFAULT_AUTO_RELOCK_SECONDS,
         queue_timeout: int = DEFAULT_QUEUE_TIMEOUT,
         user_mappings: dict = None,
+        cache_dir: str = None,
     ):
         self.username = username
         self.password = password
@@ -51,9 +53,27 @@ class EquesClient:
         self.auto_relock_seconds = auto_relock_seconds
         self.queue_timeout = queue_timeout
         self.user_mappings = user_mappings or {}
+        self.cache_dir = cache_dir
 
         self.session_bid = None
         self.session_uid = None
+        self.http_token = None
+        self.last_fid = None
+        self.last_snapshot_bytes = None
+        self.last_snapshot_time = None
+        self._cache_file = None
+
+        if self.cache_dir:
+            try:
+                os.makedirs(self.cache_dir, exist_ok=True)
+                self._cache_file = os.path.join(self.cache_dir, f"eques_snapshot_{self.device_uid}.jpg")
+                if os.path.exists(self._cache_file):
+                    with open(self._cache_file, "rb") as f:
+                        self.last_snapshot_bytes = f.read()
+                        _LOGGER.info("Loaded cached doorbell snapshot from disk (%d bytes)", len(self.last_snapshot_bytes))
+            except Exception as err:
+                _LOGGER.warning("Could not initialize snapshot disk cache: %s", err)
+
         self.cloud_ws = None
         self._running = False
         self._task = None
@@ -197,6 +217,45 @@ class EquesClient:
         self.is_doorbell_ringing = False
         self._notify_callbacks()
 
+    async def async_fetch_snapshot(self, fid: str = None) -> bytes | None:
+        """Downloads the snapshot for the given fid (or last_fid) from Eques Cloud."""
+        target_fid = fid or self.last_fid
+        if not target_fid:
+            _LOGGER.debug("No FID available to fetch snapshot")
+            return None
+        if not self.session_bid or not self.http_token:
+            _LOGGER.warning("Cannot download snapshot: session_bid or http_token not ready")
+            return None
+
+        url = (
+            f"http://{CLOUD_HOST}/eques/icvss/file-down"
+            f"?uid={self.session_bid}&token={self.http_token}&fid={target_fid}&devid={self.device_uid}"
+        )
+        _LOGGER.info("Fetching doorbell snapshot from %s", url)
+
+        try:
+            async with ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        if len(data) > 100:
+                            self.last_snapshot_bytes = data
+                            self.last_fid = target_fid
+                            _LOGGER.info("Successfully fetched doorbell snapshot (%d bytes)", len(data))
+                            if self._cache_file:
+                                try:
+                                    with open(self._cache_file, "wb") as f:
+                                        f.write(data)
+                                except Exception as err:
+                                    _LOGGER.warning("Failed to save snapshot cache: %s", err)
+                            self._notify_callbacks()
+                            return data
+                    else:
+                        _LOGGER.warning("Snapshot download returned HTTP status %d", resp.status)
+        except Exception as err:
+            _LOGGER.error("Error downloading snapshot fid %s: %s", target_fid, err)
+        return None
+
     async def _websocket_loop(self):
         """Maintains persistent connection and dispatches received messages."""
         password_md5 = hashlib.md5(self.password.encode("utf-8")).hexdigest()
@@ -238,9 +297,17 @@ class EquesClient:
                                         self.connected_to_cloud = True
                                         _LOGGER.info("Authenticated as %s (UID: %s)", self.username, self.session_uid)
                                         await ws.send_str(json.dumps({"method": "bdylist"}))
+                                        await ws.send_str(json.dumps({"method": "getok"}))
                                         self._notify_callbacks()
                                     else:
                                         _LOGGER.error("Authentication rejected: %s", payload.get("reason"))
+
+                                # 1b. Media Token (getok)
+                                elif method == "getok":
+                                    token = payload.get("token")
+                                    if token:
+                                        self.http_token = token
+                                        _LOGGER.info("Acquired Eques media token for doorbell snapshots")
 
                                 # 2. Device Status (devst)
                                 elif method == "devst":
@@ -280,6 +347,16 @@ class EquesClient:
                                     if self.queue_enabled and now <= self.queue_expires_at:
                                         _LOGGER.info("Doorbell ring with active queue! Auto-unlocking...")
                                         asyncio.create_task(self._dispatch_unlock_burst(self.pin))
+
+                                # 4b. Doorbell Snapshot Upload (filetrans)
+                                elif method == "filetrans":
+                                    fid = payload.get("fid")
+                                    filetime = payload.get("filetime")
+                                    _LOGGER.info("Received filetrans event (fid: %s, filetime: %s)", fid, filetime)
+                                    if fid:
+                                        self.last_fid = fid
+                                        self.last_snapshot_time = filetime
+                                        asyncio.create_task(self.async_fetch_snapshot(fid))
 
                                 # 5. Lock Activity Messages
                                 elif method == "smart_lock_msg":

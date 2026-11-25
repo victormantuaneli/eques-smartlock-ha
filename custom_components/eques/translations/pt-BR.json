@@ -80,6 +80,11 @@
       "unlock_on_ring": {
         "name": "Abrir ao Tocar Campainha"
       }
+    },
+    "camera": {
+      "camera": {
+        "name": "Câmera da Campainha"
+      }
     }
   }
 }

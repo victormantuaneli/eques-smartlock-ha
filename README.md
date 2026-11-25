@@ -5,6 +5,7 @@ Custom integration to connect Eques Smart Locks and Video Doorbells to Home Assi
 ## Features
 
 - **Lock Entity**: Remotely unlock using your PIN. Supports standby sleep wake-up (arms auto-unlock when doorbell rings).
+- **Doorbell Camera**: Camera snapshot entity displaying the latest doorbell ring/alarm capture directly in Home Assistant dashboards.
 - **Doorbell Sensor**: Real-time binary sensor triggering upon doorbell press or call invite.
 - **Audit Sensors**:
   - Last Unlock Method (Keypad PIN, Fingerprint, RFID Card, Face Recognition, Remote App)

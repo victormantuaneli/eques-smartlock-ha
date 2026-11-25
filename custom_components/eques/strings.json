@@ -80,6 +80,11 @@
       "unlock_on_ring": {
         "name": "Unlock on Doorbell Ring"
       }
+    },
+    "camera": {
+      "camera": {
+        "name": "Doorbell Camera"
+      }
     }
   }
 }

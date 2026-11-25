@@ -23,4 +23,4 @@ APP_KEY = "8QYyilLNP1VtBQhMdXgKEAbRB6nKBDuV"
 APP_ID = 1015
 
 # Supported platforms
-PLATFORMS = ["lock", "binary_sensor", "sensor", "switch"]
+PLATFORMS = ["lock", "binary_sensor", "sensor", "switch", "camera"]

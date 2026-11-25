@@ -45,6 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         auto_relock_seconds=auto_relock,
         queue_timeout=queue_timeout,
         user_mappings=user_mappings,
+        cache_dir=hass.config.path(".storage"),
     )
 
     # Start persistent WebSocket connection in background
