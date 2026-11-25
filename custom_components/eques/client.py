@@ -317,31 +317,8 @@ class EquesClient:
             _LOGGER.warning("Cannot wake camera: cloud connection not active")
             return False
 
-        import secrets
-        own_peer_id = secrets.token_hex(16)
-        self._current_own_peer = own_peer_id
-        rtc_ip = "47.89.155.176"
-        rtc_port = 8800
-
-        self._ensure_rtc_socket(own_peer_id, rtc_ip, rtc_port)
-
-        # 1. Send call_v2 invite
-        call_invite = {
-            "method": "call_v2",
-            "from": self.session_bid,
-            "to": self.device_uid,
-            "channel_id": 0,
-            "state": "invite",
-            "netType": 0,
-            "rtcserverip": rtc_ip,
-            "rtcserverport": 8001,
-            "op_type": 0,
-            "rtcudpip": rtc_ip,
-            "rtcudpport": rtc_port,
-            "peerid": own_peer_id,
-        }
-
-        # 2. Send wake_up_t1_r700 with id: 2, val: 1 (open camera monitor)
+        # Send standard wake-up without injecting a fake RTC call session,
+        # so we do not lock the device or crash the mobile app.
         wake_payload = {
             "method": "wake_up_t1_r700",
             "from": self.session_bid,
@@ -352,18 +329,10 @@ class EquesClient:
                 "val": 1
             },
             "wakeup_type": 0,
-            "call_invite": {
-                "ip": rtc_ip,
-                "port": rtc_port,
-                "type": 0,
-                "id": own_peer_id,
-                "uid": self.session_bid,
-            }
         }
 
-        _LOGGER.info("Sending camera monitor wake commands (id: 2, val: 1) to lock %s", self.device_uid)
+        _LOGGER.info("Sending camera monitor wake command (id: 2, val: 1) to lock %s", self.device_uid)
         try:
-            await self.cloud_ws.send_str(json.dumps(call_invite))
             await self.cloud_ws.send_str(json.dumps(wake_payload))
             return True
         except Exception as err:
@@ -558,16 +527,8 @@ class EquesClient:
                                         self._notify_callbacks()
                                         asyncio.create_task(self._schedule_doorbell_reset())
 
-                                        if remote_peer:
-                                            asyncio.create_task(
-                                                self._async_answer_call(
-                                                    remote_peer,
-                                                    payload.get("rtcudpip", "47.89.155.176"),
-                                                    payload.get("rtcudpport", 8800),
-                                                    payload.get("rtcserverip", "47.89.155.176"),
-                                                    payload.get("rtcserverport", 8001),
-                                                )
-                                            )
+                                        # Do NOT auto-answer the call in HA so we do not steal
+                                        # the video call session from the user's mobile app!
 
                                         # Check queued unlock
                                         if (
