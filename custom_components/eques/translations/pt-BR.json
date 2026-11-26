@@ -41,8 +41,7 @@
           "custom_users": "IDs Adicionais (Formato: ID: Nome, um por linha)",
           "auto_relock_seconds": "Tempo de Auto-Trancamento após Destrave (segundos)",
           "queue_timeout": "Tempo limite da fila de abertura ao tocar a campainha (segundos)",
-          "camera_rotation": "Rotação da imagem da câmera (graus: 0, 90, 180, 270)",
-          "camera_rtsp_url": "URL ou IP do stream RTSP local (opcional, deixe em branco para auto-busca)"
+          "camera_rotation": "Rotação da imagem da câmera (graus: 0, 90, 180, 270)"
         }
       }
     }
@@ -86,11 +85,6 @@
     "camera": {
       "camera": {
         "name": "Câmera da Campainha"
-      }
-    },
-    "button": {
-      "wake_camera": {
-        "name": "Acordar Câmera / Stream"
       }
     }
   }

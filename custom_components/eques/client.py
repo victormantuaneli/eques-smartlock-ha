@@ -5,11 +5,6 @@ import hashlib
 import json
 import logging
 import os
-import re
-import secrets
-import select
-import socket
-import struct
 import time
 from datetime import datetime
 from aiohttp import ClientSession, WSMsgType
@@ -23,7 +18,6 @@ from .const import (
     CONF_QUEUE_TIMEOUT,
     CONF_USER_MAPPINGS,
     CONF_CAMERA_ROTATION,
-    CONF_CAMERA_RTSP_URL,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
     DEFAULT_CAMERA_ROTATION,
@@ -58,7 +52,6 @@ class EquesClient:
         queue_timeout: int = DEFAULT_QUEUE_TIMEOUT,
         user_mappings: dict = None,
         camera_rotation: int = DEFAULT_CAMERA_ROTATION,
-        camera_rtsp_url: str = "",
         cache_dir: str = None,
     ):
         self.username = username
@@ -69,8 +62,6 @@ class EquesClient:
         self.queue_timeout = queue_timeout
         self.user_mappings = user_mappings or {}
         self.camera_rotation = camera_rotation
-        self.camera_rtsp_url = camera_rtsp_url or ""
-        self.device_ip = None
         self.cache_dir = cache_dir
 
         self.session_bid = None
@@ -130,13 +121,10 @@ class EquesClient:
             self.queue_timeout = options[CONF_QUEUE_TIMEOUT]
         if CONF_CAMERA_ROTATION in options:
             self.camera_rotation = options[CONF_CAMERA_ROTATION]
-        if CONF_CAMERA_RTSP_URL in options:
-            self.camera_rtsp_url = options[CONF_CAMERA_RTSP_URL]
         _LOGGER.info(
-            "Updated EquesClient options (user mappings: %s, rotation: %s, rtsp: %s)",
+            "Updated EquesClient options (user mappings: %s, rotation: %s)",
             self.user_mappings,
             self.camera_rotation,
-            self.camera_rtsp_url,
         )
         self._notify_callbacks()
 
@@ -164,7 +152,6 @@ class EquesClient:
     async def stop(self):
         """Stops the client and closes WebSocket connection."""
         self._running = False
-        await self.async_stop_rtc_stream()
         if self.cloud_ws:
             await self.cloud_ws.close()
         if self._task:
@@ -253,214 +240,6 @@ class EquesClient:
         await asyncio.sleep(15)
         self.is_doorbell_ringing = False
         self._notify_callbacks()
-
-    async def async_start_rtc_stream(self) -> bool:
-        """Starts real-time YKRTC media streamer forwarding RTP to go2rtc port 8556."""
-        self._last_stream_activity = time.time()
-        if getattr(self, "_rtc_streaming", False) and getattr(self, "_rtc_task", None) and not self._rtc_task.done():
-            _LOGGER.debug("YKRTC stream already active; refreshed activity timestamp")
-            return True
-
-        self._rtc_streaming = True
-        self._rtc_task = asyncio.create_task(self._rtc_stream_loop())
-        return True
-
-    async def async_stop_rtc_stream(self):
-        """Stops the YKRTC media streamer."""
-        self._rtc_streaming = False
-        if getattr(self, "_rtc_task", None) and not self._rtc_task.done():
-            self._rtc_task.cancel()
-
-    async def _ensure_go2rtc_stream(self):
-        """Ensures the go2rtc stream 'campainha' is registered with source rtp:127.0.0.1:8556."""
-        try:
-            async with ClientSession() as session:
-                url = "http://127.0.0.1:1984/api/streams?name=campainha&src=rtp:127.0.0.1:8556"
-                async with session.put(url, timeout=3) as resp:
-                    _LOGGER.info("go2rtc PUT campainha response status: %s", resp.status)
-        except Exception as err:
-            _LOGGER.debug("Could not verify go2rtc stream registration: %s", err)
-
-    async def _rtc_stream_loop(self):
-        """Loop that connects to Eques RTC relay, negotiates session, and forwards RTP packets to go2rtc."""
-        await self._ensure_go2rtc_stream()
-
-        own_peer_id = secrets.token_hex(16)
-        self._current_own_peer = own_peer_id
-
-        # Local UDP socket for relay communication
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("0.0.0.0", 0))
-        sock.setblocking(False)
-
-        rtc_ip = "47.89.155.176"
-        rtc_port = 8800
-        go2rtc_udp_dest = ("127.0.0.1", 8556)
-
-        # 1. Opcode 1 (Authenticate)
-        auth_pkt = bytearray([0xC0, 0x01, 0x00, 0x40])
-        auth_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
-        sock.sendto(auth_pkt, (rtc_ip, rtc_port))
-
-        # 2. Opcode 2 (Channel Apply)
-        apply_pkt = bytearray([0x02, 0x00, 0x40])
-        apply_pkt.extend(own_peer_id.encode("ascii").ljust(64, b"\x00"))
-        sock.sendto(apply_pkt, (rtc_ip, rtc_port))
-
-        channel_id = 0
-        last_keepalive = time.time()
-        packets_forwarded = 0
-
-        def send_add_peer(remote_peer: str, ch: int):
-            pkt = bytearray([0x04, 0x00, 0x44])
-            pkt.extend(remote_peer.encode("ascii").ljust(64, b"\x00"))
-            pkt.extend(struct.pack(">I", ch))
-            sock.sendto(pkt, (rtc_ip, rtc_port))
-            _LOGGER.info("Linked RTC peer %s to channel %s on relay", remote_peer[:8], ch)
-
-        async def send_call_answer(remote_peer: str, ch: int):
-            if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
-                return
-            ans = {
-                "method": "call_v2",
-                "from": self.session_bid,
-                "to": self.device_uid,
-                "channel_id": ch,
-                "state": "answer",
-                "netType": 0,
-                "rtcserverip": rtc_ip,
-                "rtcserverport": 8001,
-                "op_type": 0,
-                "rtcudpip": rtc_ip,
-                "rtcudpport": rtc_port,
-                "peerid": own_peer_id,
-            }
-            await self.cloud_ws.send_str(json.dumps(ans))
-            _LOGGER.info("Sent call_v2 answer to lock for peer %s (ch=%s)", remote_peer[:8], ch)
-
-        # Wake device / monitor if in standby
-        await self.async_wake_camera()
-
-        try:
-            while self._rtc_streaming and (time.time() - self._last_stream_activity < 30.0):
-                try:
-                    data, addr = sock.recvfrom(4096)
-                    if len(data) >= 7 and data[0] == 0x02:
-                        ch = struct.unpack(">I", data[3:7])[0]
-                        channel_id = ch
-                        _LOGGER.info("Relay assigned channel_id: %s", channel_id)
-                        if hasattr(self, "_last_remote_peer") and self._last_remote_peer:
-                            send_add_peer(self._last_remote_peer, channel_id)
-                            await send_call_answer(self._last_remote_peer, channel_id)
-                    elif data[0] >= 0x80:
-                        # Raw RFC 3550 RTP packet -> forward to go2rtc
-                        sock.sendto(data, go2rtc_udp_dest)
-                        packets_forwarded += 1
-                        if packets_forwarded % 50 == 1:
-                            _LOGGER.debug("Forwarded %d RTP packets to go2rtc", packets_forwarded)
-                    elif data[0] == 0x7E and len(data) > 12:
-                        # RTP packet with 12-byte header
-                        sock.sendto(data[12:], go2rtc_udp_dest)
-                        packets_forwarded += 1
-                    elif data[0] == 0x06:
-                        _LOGGER.debug("Relay notification: channel peer added")
-                except BlockingIOError:
-                    await asyncio.sleep(0.005)
-                except Exception as err:
-                    _LOGGER.debug("UDP recv error: %s", err)
-                    await asyncio.sleep(0.01)
-
-                # Keepalive auth every 2 seconds
-                if time.time() - last_keepalive > 2.0:
-                    sock.sendto(auth_pkt, (rtc_ip, rtc_port))
-                    last_keepalive = time.time()
-
-                # If remote peer arrived from cloud_ws while waiting for channel
-                if channel_id and hasattr(self, "_last_remote_peer") and self._last_remote_peer and not getattr(self, "_peer_linked", False):
-                    send_add_peer(self._last_remote_peer, channel_id)
-                    await send_call_answer(self._last_remote_peer, channel_id)
-                    self._peer_linked = True
-
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._rtc_streaming = False
-            self._peer_linked = False
-            sock.close()
-            _LOGGER.info("YKRTC streaming session ended (forwarded %d packets)", packets_forwarded)
-
-    async def async_wake_camera(self) -> bool:
-        """Wakes up the camera / requests video monitor stream via Cloud WebSocket."""
-        if not self.cloud_ws or self.cloud_ws.closed or not self.session_bid:
-            _LOGGER.warning("Cannot wake camera: cloud connection not active")
-            return False
-
-        # Send standard wake-up without injecting a fake RTC call session,
-        # so we do not lock the device or crash the mobile app.
-        wake_payload = {
-            "method": "wake_up_t1_r700",
-            "from": self.session_bid,
-            "to": self.device_uid,
-            "id": int(time.time()),
-            "value": {
-                "id": 2,
-                "val": 1
-            },
-            "wakeup_type": 0,
-        }
-
-        _LOGGER.info("Sending camera monitor wake command (id: 2, val: 1) to lock %s", self.device_uid)
-        try:
-            await self.cloud_ws.send_str(json.dumps(wake_payload))
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to send camera wake commands: %s", err)
-            return False
-
-    async def async_discover_local_rtsp(self) -> str | None:
-        """Discovers the lock's local RTSP stream URL via native SSDP probe."""
-        if self.camera_rtsp_url:
-            return self.camera_rtsp_url
-
-        loop = asyncio.get_running_loop()
-        rtsp_url = await loop.run_in_executor(None, self._ssdp_probe_sync)
-        if rtsp_url:
-            self.camera_rtsp_url = rtsp_url
-            _LOGGER.info("Discovered local RTSP stream URL: %s", rtsp_url)
-            self._notify_callbacks()
-            return rtsp_url
-        return None
-
-    def _ssdp_probe_sync(self) -> str | None:
-        """Synchronous UDP SSDP probe discovered from libicvss.so reverse engineering."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        sock.settimeout(2.5)
-
-        try:
-            # 16-byte native magic packet discovered in Search_Url / libicvss.so
-            payload = b"1111111111111111"
-            sock.sendto(payload, ("239.255.255.250", 1900))
-            start = time.time()
-            while time.time() - start < 3.0:
-                r, _, _ = select.select([sock], [], [], 0.5)
-                if r:
-                    data, addr = sock.recvfrom(2048)
-                    text = data.decode("utf-8", errors="ignore")
-                    if "eques" in text.lower() or "8200" in text:
-                        m = re.search(r"http://([0-9\.]+):", text)
-                        if m:
-                            ip = m.group(1)
-                        else:
-                            ip = addr[0]
-                        self.device_ip = ip
-                        return f"rtsp://{ip}:554/1"
-        except Exception as err:
-            _LOGGER.debug("SSDP probe exception: %s", err)
-        finally:
-            sock.close()
-        return None
 
     async def async_fetch_snapshot(self, fid: str = None) -> bytes | None:
         """Downloads the snapshot for the given fid (or last_fid) from Eques Cloud."""
@@ -589,15 +368,12 @@ class EquesClient:
                                 # 3. Doorbell Call (call_v2)
                                 elif method == "call_v2":
                                     now = time.time()
-                                    self.device_status = "awake"
                                     state = payload.get("state")
                                     remote_peer = payload.get("peerid")
                                     _LOGGER.info("WS Event call_v2 (state: %s, peer: %s)", state, remote_peer)
 
-                                    if remote_peer:
-                                        self._last_remote_peer = remote_peer
-
                                     if state == "invite":
+                                        self.device_status = "awake"
                                         self.is_doorbell_ringing = True
                                         self.last_ring_time = int(now)
                                         self.last_ring_datetime = (
@@ -607,10 +383,6 @@ class EquesClient:
                                         )
                                         self._notify_callbacks()
                                         asyncio.create_task(self._schedule_doorbell_reset())
-
-                                        # If HA is actively streaming (user watching live view):
-                                        if getattr(self, "_rtc_streaming", False):
-                                            self._last_stream_activity = now
 
                                         # Check queued unlock
                                         if (
@@ -624,10 +396,10 @@ class EquesClient:
                                                 self._dispatch_unlock_burst(self.pin)
                                             )
 
-                                    elif state == "answer":
-                                        _LOGGER.info("Lock answered camera call (remote peer: %s)", remote_peer)
-                                        if getattr(self, "_rtc_streaming", False):
-                                            self._last_stream_activity = now
+                                    elif state == "hangup":
+                                        _LOGGER.info("Doorbell call ended (hangup)")
+                                        self.device_status = "standby"
+                                        self._notify_callbacks()
 
                                 # 4. Doorbell Ring (ring)
                                 elif method == "ring":

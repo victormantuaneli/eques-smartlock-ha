@@ -14,7 +14,6 @@ from .const import (
     CONF_USER_MAPPINGS,
     CONF_USERNAME,
     CONF_CAMERA_ROTATION,
-    CONF_CAMERA_RTSP_URL,
     DEFAULT_AUTO_RELOCK_SECONDS,
     DEFAULT_QUEUE_TIMEOUT,
     DEFAULT_CAMERA_ROTATION,
@@ -40,7 +39,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     queue_timeout = options.get(CONF_QUEUE_TIMEOUT, DEFAULT_QUEUE_TIMEOUT)
     user_mappings = options.get(CONF_USER_MAPPINGS, {})
     camera_rotation = options.get(CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION)
-    camera_rtsp_url = options.get(CONF_CAMERA_RTSP_URL, "")
 
     client = EquesClient(
         username=username,
@@ -51,7 +49,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         queue_timeout=queue_timeout,
         user_mappings=user_mappings,
         camera_rotation=camera_rotation,
-        camera_rtsp_url=camera_rtsp_url,
         cache_dir=hass.config.path(".storage"),
     )
 
@@ -95,5 +92,4 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
         client.camera_rotation = options.get(
             CONF_CAMERA_ROTATION, DEFAULT_CAMERA_ROTATION
         )
-        client.camera_rtsp_url = options.get(CONF_CAMERA_RTSP_URL, "")
         _LOGGER.info("Eques options updated dynamically")

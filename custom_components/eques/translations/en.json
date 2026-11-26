@@ -41,8 +41,7 @@
           "custom_users": "Additional User IDs (Format: ID: Name, one per line)",
           "auto_relock_seconds": "Auto-relock timeout after unlock (seconds)",
           "queue_timeout": "Doorbell ring unlock queue timeout (seconds)",
-          "camera_rotation": "Camera snapshot rotation angle (degrees: 0, 90, 180, 270)",
-          "camera_rtsp_url": "Local RTSP stream URL or IP (optional, leave blank for auto-discovery)"
+          "camera_rotation": "Camera snapshot rotation angle (degrees: 0, 90, 180, 270)"
         }
       }
     }
@@ -86,11 +85,6 @@
     "camera": {
       "camera": {
         "name": "Doorbell Camera"
-      }
-    },
-    "button": {
-      "wake_camera": {
-        "name": "Wake Camera / Stream"
       }
     }
   }

@@ -28,7 +28,7 @@ async def async_setup_entry(
 
 
 class EquesDoorbellCamera(Camera):
-    """Representation of the Eques Doorbell camera (snapshots and live RTSP stream)."""
+    """Representation of the Eques Doorbell camera (doorbell snapshots)."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "camera"
@@ -43,8 +43,8 @@ class EquesDoorbellCamera(Camera):
 
     @property
     def supported_features(self) -> CameraEntityFeature:
-        """Return supported features. Stream is always supported via go2rtc/YKRTC."""
-        return CameraEntityFeature.STREAM
+        """Return supported features. Pure snapshot camera entity without live stream."""
+        return CameraEntityFeature(0)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -74,16 +74,9 @@ class EquesDoorbellCamera(Camera):
             attrs["last_snapshot_time"] = self._client.last_snapshot_time
         if self._client.last_fid:
             attrs["last_fid"] = self._client.last_fid
-        attrs["stream_url"] = self._client.camera_rtsp_url or "rtsp://127.0.0.1:8554/campainha"
         if self._client.device_ip:
             attrs["device_ip"] = self._client.device_ip
         return attrs
-
-    async def stream_source(self) -> str | None:
-        """Return the RTSP stream source for live view."""
-        # Trigger real-time YKRTC media streamer forwarding to go2rtc
-        await self._client.async_start_rtc_stream()
-        return self._client.camera_rtsp_url or "rtsp://127.0.0.1:8554/campainha"
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -95,7 +88,7 @@ class EquesDoorbellCamera(Camera):
         if not data:
             return None
 
-        rotation = getattr(self._client, "camera_rotation", 270)
+        rotation = getattr(self._client, "camera_rotation", 90)
         if rotation % 360 == 0:
             return data
 
